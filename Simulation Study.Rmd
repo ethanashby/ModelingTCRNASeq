@@ -1,0 +1,156 @@
+---
+title: "Simulation Study"
+author: "Ethan Ashby"
+date: "8/3/2020"
+output: html_document
+---
+
+## Packages and Real Data
+```{r Load packages and functions, echo=FALSE, cache=TRUE, warning=FALSE}
+library(tidyverse)
+library(ImpulseDE2)
+library(DESeq2)
+library(gridExtra)
+library(grid)
+library(gridGraphics)
+library(reshape2)
+library(data.table)
+library(knitr)
+library(limma)
+
+foo<-function(){}
+
+sigmoid_function<-function(b, h_0, h_1, t_1, t){
+h_0 + (h_1-h_0)*(1/(1+exp(1)^(-b*(t-t_1))))
+}
+
+impulse_function<-function(b, h_0, h_1, h_2, t_1, t_2, t){
+  (1/h_1)*(h_0+(h_1-h_0)/(1+exp(-b*(t-t_1))))*(h_2+(h_1-h_2)/(1+exp(b*(t-t_2))))
+}
+```
+
+```{r Read in functions from ImpulseDE2 package, cache=TRUE, echo=FALSE, message=FALSE, include=FALSE}
+library(compiler)
+
+#####
+#Read in functions in ImpulseDE2 package
+#####
+
+"./ImpulseDE2Yosef/ImpulseDE2-master/R/"
+files <- list.files(path="./ImpulseDE2Yosef/ImpulseDE2-master/R/", pattern="*.R", full.names=TRUE, recursive=FALSE)
+
+lapply(files, source)
+```
+
+```{r Upstream filtering, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE, results='hide', include=FALSE}
+allCounts <- read.csv("LB_Time_Course_GCA_000005845.2_ASM584v2_genomic_counts copy.tsv", header = T, sep = "\t")
+allCounts$GeneidBackup = allCounts$Geneid
+allCounts <- allCounts %>% tidyr::separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+allCounts %>% group_by(feature) %>% summarise(number_of_genes = n())
+# Now, we must extract the genenames from each Geneid. However, each feature has a slightly different pattern, and we will need to do the features separately. 
+
+# IGR's (this includes AS_IGRSs): 
+# IGR stands for intergenic region which means a region between coding sequences or different types of RNA. Therefore, we'll have a start.bnum and end.bnum as well as a start.genename and end.genename. Note that not all genes will have a bnum (only CDS/AS_CDS do)
+bnum = "b[0-9]{4}" # what do bnumbers look like?
+genename = ",[a-z]{3}[A-Z,]." # what does a genename look like? this is regexp lingo
+rna.name = ",rna[0-9].." # what does an RNA name look like?
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid # store the Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]") # separate the first part of the Geneid which talks about the IGR's start gene (Geneid1) and the last part of the IGR Geneid which talks about that IGR's end gene (Geneid2). 
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1 #start feature
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when( #start gene name: many possibilities!
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename), #if the start feature was CDS, then the name is going to be genename style, so we extract a genename-type thing from Geneid1
+    TRUE ~ str_extract(igr$Geneid1, rna.name)) #otherwise, it's going to have an RNA-style name, so we extract the rna.name from Geneid1
+igr$end.gene <- case_when( #end gene neame: similar to above!
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename), # if the end feature was CDS, then we're looking for a genename-type bit from Geneid2
+    TRUE ~ str_extract(igr$Geneid2, rna.name)) #otherwise, it must be an RNA-style label of some sort. 
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum), #bnums only exist for CDS, so we check if the feature is CDS before extracting a bnum from Geneid1
+    TRUE ~ "none") # if not CDS, then no bnum exists so we can put "none"
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum), #same thing as above but for end bnum
+    TRUE ~ "none")
+# now get rid of all those pesky commas that got into our start.gene labels. I could have not included the punctuation in my regex pattern, but then str_extract() might have gotten confused with a less specific pattern
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% dplyr::select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% dplyr::select(-comma)
+allCounts <- full_join(igr, allCounts) #add this new information to allCounts!
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.." #new genename pattern
+#bnum pattern stays the same
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename) #extract those genenames!
+cds$bnum <- str_extract(cds$Geneid, bnum) # extract them bnums!
+#get rid of the pesky colon that was part of the pattern
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon)
+allCounts <- full_join(allCounts, cds) #add the new info to allCounts
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].." #new rna.name pattern
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA"))
+rna$genename <- str_extract(rna$Geneid, rna.name) #record those rna.names
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon) #get rid of colon
+allCounts <- full_join(allCounts, rna) #update allCounts with ncRNA names!
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA"))
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name) #same rna.name pattern exists as above, so extract those rna.names! And store the result as genename - I know. This is just for convenience's sake so we have a common column to refer to when we want the short hand name for a gene. 
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon) #get rid of that colon
+allCounts <- full_join(allCounts, rRNA) #update allCounts
+#tRNA -- analogous to rRNA above. 
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA"))
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+# remove the NA rows we just created by full_joining while adding the ncRNA, rRNA, tRNA genenames
+allCounts <- filter(allCounts, feature %in% c("IGR", "AS_IGR") | genename != "NA")
+
+#filter by CDS, NA, 0 sums, resolve duplicates
+#filter
+ecounts<-allCounts %>% filter(feature=="CDS")
+#remove NA and rows of 0's
+ecounts<-ecounts[rowSums(is.na(ecounts)) != ncol(ecounts), ]
+ecounts<-subset(ecounts, rowSums(ecounts[,2:37])>0)
+#resolve duplicates (takes the first row corresponding to a genename)
+ecounts<- ecounts %>% dplyr::distinct(genename, .keep_all=TRUE)
+rownames(ecounts)<-ecounts$genename
+ecounts<-ecounts[,2:37]
+```
+
+```{r Normalized counts, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+colidesign<-data.frame(time=as.factor(rep(c("0", "30", "60", "90", "120", "150"), 6)), rep=as.factor(c(rep(1, 12), rep(2,12), rep(3,12))), treatment=as.factor(c(rep("WT",6), rep("treat",6), rep("WT",6), rep("treat",6), rep("WT",6), rep("treat",6)))) %>%
+  mutate(timetreat=paste(treatment, time, sep=""))
+
+ddsecoliCountTable <- DESeqDataSetFromMatrix(
+  countData = ecounts,
+  colData = colidesign,
+  design = ~ timetreat)
+
+#ID'ed 728 DEGs w/ padj<0.01
+#ID genes DE over time (0 min to 150 min in WT strain)
+ecolidds<-DESeq(ddsecoliCountTable)
+normecounts<-as.data.frame(counts(ecolidds, normalized=TRUE))
+```
+
+```{r where are normalized counts centered at each TP}
+normecounts[,grepl("JH01", colnames(normecounts))] %>% rowMeans() %>% density() %>% plot(xlim=c(0,10000))
+
+tmp<-normecounts[,grepl("JH01", colnames(normecounts))] %>% melt()
+fit <- fitdist(round(tmp$value), "nbinom")
+
+rnbinom(n=10, mu=fit$estimate[2], size=fit$estimate[1])
+```
+
+## Simulate
+
+```{r}
+t<-sample(seq(0, 150, 1), size=100, replace=TRUE)
+h0<-sample(0:10^10, size=5, replace=TRUE)
+```
+
+

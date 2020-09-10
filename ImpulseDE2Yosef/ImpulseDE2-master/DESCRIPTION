@@ -1,0 +1,58 @@
+Package: ImpulseDE2
+Type: Package
+Title: Differential expression analysis of longitudinal count data sets
+Version: 0.99.9
+Date: 2017-04-07
+Authors@R: c(
+	person('David S', 'Fischer', NULL, 'david.fischer@helmholtz-muenchen.de', c('aut','cre')),
+	person('Fabian', 'Theis', NULL, 'fabian.theis@helmholtz-muenchen.de', 'ctb'),
+	person('Nir', 'Yosef', NULL, 'niryosef@berkeley.edu', 'ctb'))
+Author: David S Fischer [aut, cre], Fabian J Theis [ctb], Nir Yosef [ctb]
+Maintainer: David S Fischer <david.fischer@helmholtz-muenchen.de>
+Description: ImpulseDE2 is a differential expression algorithm for longitudinal count data sets which arise in sequencing experiments such as RNA-seq, ChIP-seq, ATAC-seq and DNaseI-seq. ImpulseDE2 is based on a negative binomial noise model with dispersion trend smoothing by DESeq2 and uses the impulse model to constrain the mean expression trajectory of each gene. The impulse model was empirically found to fit global expression changes in cells after environmental and developmental stimuli and is therefore appropriate in most cell biological scenarios. The constraint on the mean expression trajectory prevents overfitting to small expression fluctuations. Secondly, ImpulseDE2 has higher statistical testing power than generalized linear model-based differential expression algorithms which fit time as a categorial variable if more than six time points are sampled because of the fixed number of parameters.
+License: Artistic-2.0
+Encoding: UTF-8
+Imports:
+    Biobase,
+    BiocParallel,
+    ComplexHeatmap,
+    circlize,
+    compiler,
+    cowplot,
+    DESeq2,
+    ggplot2,
+    grDevices,
+    knitr,
+    Matrix,
+    methods,
+    S4Vectors,
+    stats,
+    SummarizedExperiment,
+    utils
+biocViews: Software,
+    StatisticalMethod,
+    TimeCourse,
+    Sequencing,
+    DifferentialExpression,
+    GeneExpression,
+    CellBiology,
+    CellBasedAssays,
+    ImmunoOncology
+Collate:
+    'ImpulseDE2_main.R'
+    'srcImpulseDE2_CostFunctionsFit.R'
+    'srcImpulseDE2_classImpulseDE2Object.R'
+    'srcImpulseDE2_computeNormConst.R'
+    'srcImpulseDE2_evalImpulse.R'
+    'srcImpulseDE2_evalSigmoid.R'
+    'srcImpulseDE2_fitImpulse.R'
+    'srcImpulseDE2_fitSigmoid.R'
+    'srcImpulseDE2_plotGenes.R'
+    'srcImpulseDE2_plotHeatmap.R'
+    'srcImpulseDE2_processData.R'
+    'srcImpulseDE2_runDEAnalysis.R'
+    'srcImpulseDE2_runDESeq2.R'
+    'srcImpulseDE2_simulateDataSet.R'
+RoxygenNote: 6.0.1
+VignetteBuilder: knitr
+BugReports: https://github.com/YosefLab/ImpulseDE2/issues

@@ -1,0 +1,401 @@
+---
+title: "ImpulseDE2 modeling of TC RNA-Seq data with random initializations"
+author: "Ethan Ashby"
+date: "5/29/2020"
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage[utf8]{inputenc}
+output:
+  pdf_document: default
+  word_document: default
+---
+
+# Overview
+
+Sigmoidal and Impulse models are S-shaped curves that are descriptive of a variety of biological responses, and are parameterized by biologically meaningful parameters. Particularly, we are interested in how these models can be applied to gene expression measurements over time in response to environmental stimuli.  
+
+Here we focus on an algorithm (ImpulseDE2) for fitting sigmoidal and impulse models to gene-wise expression measurements for the purpose of differential expression testing. The model fits gene-wise expression models using a non-linear optimization approach and then compares the signficance of each model to a constant model (no signal) and to each other using a log ratio test. The data we are working with is a 150 minute time-course RNA-sequencing experiment of *E. coli* cells in response to cell starvation. We are particularly interested in the onset time (t_1) parameter of these models, as they can be used as a proxy for when genes are 'turning on' in response to a stimuli and can be used to test the hypothesis that sensitivity/insensitivity to RpoS could be a mechanism for controlling order and timing or gene expression in response to stress.  
+
+For some reason- probably due to the sparseness of our time point measurements and the algorithm's poor initialization procedure for the parameter values- the algorithm is reaching local minima in its optimization procedure, leading to models that do not accurately reflect the data they are trying to fit.  
+
+This code will walk you through the problem we encountered and updates I've made to the initialization procedure to get better (albeit not perfect) models that should provide more accurate estimation of the onset time parameters.  
+
+# Out-of-the-box ImpulseDE2 has problems modeling gene expression profiles
+
+When we fit models to genes using the out-of-the-box ImpulseDE2 approach, we get lists of genes identified as monotonically differentially expressed (i.e. can be described by the sigmoid model), transiently differentially expressed (i.e. can be described by the impulse model), or ambiguous. When we take the monotonically differentially expressed genes and extract their sigmoidal model parameters, and plot a histogram of the t_1 (onset time) parameters, the approach suggests that the vast majority of genes (>90%) are turning on around 60 minutes. Initially, we believed that this suggested that the hypothesis that sensitivity was controlling timing was unsupported. In fact, it looked like large groups of genes were all turning on at around the same time.  
+
+But a look closer shows that the models fit by this ImpulseDE2 approach were actually quite poor in terms of their fit to the data. Shown are plots of three related genes, gadA, gadB, and gadC, which show clear monotonic behavior that should be explainable by the sigmoid model. However, the sigmoid model fits get it all wrong, for these genes and presumably for others! The onset time, slope of expression induction, and final expression levels are not at all reflected in our data. So we cannot ascribe any confidence to the out-of-the-box parameter estimates... our quest for better modeling of these functions continues.  
+
+```{r Packages and Functions, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(ImpulseDE2)
+library(DESeq2)
+library(gridExtra)
+library(grid)
+library(gridGraphics)
+library(reshape2)
+library(data.table)
+library(knitr)
+
+foo<-function(){}
+
+sigmoid_function<-function(b, h_0, h_1, t_1, t){
+h_0 + (h_1-h_0)*(1/(1+exp(1)^(-b*(t-t_1))))
+}
+
+impulse_function<-function(b, h_0, h_1, h_2, t_1, t_2, t){
+  (1/h_1)*(h_0+(h_1-h_0)/(1+exp(-b*(t-t_1))))*(h_2+(h_1-h_2)/(1+exp(b*(t-t_2))))
+}
+```
+
+```{r Read in functions from ImpulseDE2 package, cache=TRUE, echo=FALSE, message=FALSE, include=FALSE}
+library(compiler)
+
+#####
+#Read in functions in ImpulseDE2 package
+#####
+
+"./ImpulseDE2Yosef/ImpulseDE2-master/R/"
+files <- list.files(path="./ImpulseDE2Yosef/ImpulseDE2-master/R/", pattern="*.R", full.names=TRUE, recursive=FALSE)
+
+lapply(files, source)
+```
+
+```{r Upstream filtering, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE, results='hide', include=FALSE}
+allCounts <- read.csv("LB_Time_Course_GCA_000005845.2_ASM584v2_genomic_counts copy.tsv", header = T, sep = "\t")
+allCounts$GeneidBackup = allCounts$Geneid
+allCounts <- allCounts %>% tidyr::separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+allCounts %>% group_by(feature) %>% summarise(number_of_genes = n())
+# Now, we must extract the genenames from each Geneid. However, each feature has a slightly different pattern, and we will need to do the features separately. 
+
+# IGR's (this includes AS_IGRSs): 
+# IGR stands for intergenic region which means a region between coding sequences or different types of RNA. Therefore, we'll have a start.bnum and end.bnum as well as a start.genename and end.genename. Note that not all genes will have a bnum (only CDS/AS_CDS do)
+bnum = "b[0-9]{4}" # what do bnumbers look like?
+genename = ",[a-z]{3}[A-Z,]." # what does a genename look like? this is regexp lingo
+rna.name = ",rna[0-9].." # what does an RNA name look like?
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid # store the Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]") # separate the first part of the Geneid which talks about the IGR's start gene (Geneid1) and the last part of the IGR Geneid which talks about that IGR's end gene (Geneid2). 
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1 #start feature
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when( #start gene name: many possibilities!
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename), #if the start feature was CDS, then the name is going to be genename style, so we extract a genename-type thing from Geneid1
+    TRUE ~ str_extract(igr$Geneid1, rna.name)) #otherwise, it's going to have an RNA-style name, so we extract the rna.name from Geneid1
+igr$end.gene <- case_when( #end gene neame: similar to above!
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename), # if the end feature was CDS, then we're looking for a genename-type bit from Geneid2
+    TRUE ~ str_extract(igr$Geneid2, rna.name)) #otherwise, it must be an RNA-style label of some sort. 
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum), #bnums only exist for CDS, so we check if the feature is CDS before extracting a bnum from Geneid1
+    TRUE ~ "none") # if not CDS, then no bnum exists so we can put "none"
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum), #same thing as above but for end bnum
+    TRUE ~ "none")
+# now get rid of all those pesky commas that got into our start.gene labels. I could have not included the punctuation in my regex pattern, but then str_extract() might have gotten confused with a less specific pattern
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% dplyr::select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% dplyr::select(-comma)
+allCounts <- full_join(igr, allCounts) #add this new information to allCounts!
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.." #new genename pattern
+#bnum pattern stays the same
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename) #extract those genenames!
+cds$bnum <- str_extract(cds$Geneid, bnum) # extract them bnums!
+#get rid of the pesky colon that was part of the pattern
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon)
+allCounts <- full_join(allCounts, cds) #add the new info to allCounts
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].." #new rna.name pattern
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA"))
+rna$genename <- str_extract(rna$Geneid, rna.name) #record those rna.names
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon) #get rid of colon
+allCounts <- full_join(allCounts, rna) #update allCounts with ncRNA names!
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA"))
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name) #same rna.name pattern exists as above, so extract those rna.names! And store the result as genename - I know. This is just for convenience's sake so we have a common column to refer to when we want the short hand name for a gene. 
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon) #get rid of that colon
+allCounts <- full_join(allCounts, rRNA) #update allCounts
+#tRNA -- analogous to rRNA above. 
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA"))
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  dplyr::select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+# remove the NA rows we just created by full_joining while adding the ncRNA, rRNA, tRNA genenames
+allCounts <- filter(allCounts, feature %in% c("IGR", "AS_IGR") | genename != "NA")
+
+#filter by CDS, NA, 0 sums, resolve duplicates
+#filter
+ecounts<-allCounts %>% filter(feature=="CDS")
+#remove NA and rows of 0's
+ecounts<-ecounts[rowSums(is.na(ecounts)) != ncol(ecounts), ]
+ecounts<-subset(ecounts, rowSums(ecounts[,2:37])>0)
+#resolve duplicates (takes the first row corresponding to a genename)
+ecounts<- ecounts %>% dplyr::distinct(genename, .keep_all=TRUE)
+rownames(ecounts)<-ecounts$genename
+ecounts<-ecounts[,2:37]
+```
+
+```{r Normalized counts, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+colidesign<-data.frame(time=as.factor(rep(c("0", "30", "60", "90", "120", "150"), 6)), rep=as.factor(c(rep(1, 12), rep(2,12), rep(3,12))), treatment=as.factor(c(rep("WT",6), rep("treat",6), rep("WT",6), rep("treat",6), rep("WT",6), rep("treat",6)))) %>%
+  mutate(timetreat=paste(treatment, time, sep=""))
+
+ddsecoliCountTable <- DESeqDataSetFromMatrix(
+  countData = ecounts,
+  colData = colidesign,
+  design = ~ timetreat)
+
+#ID'ed 728 DEGs w/ padj<0.01
+#ID genes DE over time (0 min to 150 min in WT strain)
+ecolidds<-DESeq(ddsecoliCountTable)
+normecounts<-as.data.frame(counts(ecolidds, normalized=TRUE))
+```
+
+```{r Run ImpulseDE2 and Read list of DEGs we obtained by intersecting multiple DE tools, cache=TRUE, echo=FALSE}
+
+####
+#build design matrix and run ImpulseDE2
+####
+stoebeldesign<-data.frame(Sample=colnames(ecounts), Condition=c(rep("case",6), rep("control",6), rep("case",6), rep("control",6), rep("case",6), rep("control",6)), Time=rep(c(0,30,60,90,120,150),6))
+
+impulse_ecoli<-ImpulseDE2::runImpulseDE2(as.matrix(ecounts), stoebeldesign, boolCaseCtrl=TRUE, vecConfounders=NULL, scaQThres = 0.01, boolIdentifyTransients = TRUE, boolVerbose=FALSE)
+
+#list of DEGs from previous work where we took an intersection of multiple differential expression tools
+ecoli_degs<-read.csv("ecoli_DEGs copy.csv", header=TRUE)
+```
+
+```{r Illustrate modeling problems with plots, cache=TRUE, echo=FALSE}
+#extract monotonic (sigmoid), transient (impulse), and other (ambiguous) differentially expressed genes
+DEmono<- impulse_ecoli$dfImpulseDE2Results[impulse_ecoli$dfImpulseDE2Results$isMonotonous==TRUE,] %>% filter(padj<0.01) %>% filter(Gene %in% ecoli_degs$x)
+DEtrans<-impulse_ecoli$dfImpulseDE2Results[impulse_ecoli$dfImpulseDE2Results$isTransient==TRUE,] %>% filter(padj<0.01) %>% filter(Gene %in% ecoli_degs$x)
+DEother<-impulse_ecoli$dfImpulseDE2Results %>% filter(padj<0.01) %>% filter(isTransient==FALSE) %>% filter(isMonotonous==FALSE) %>% filter(Gene %in% ecoli_degs$x)
+
+#extract parameters for sigmoidal genes
+monoDE<-DEmono$Gene
+monoparamsmat<-matrix(ncol=4, nrow=length(monoDE))
+for (i in 1:length(monoDE)){
+   monoparamsmat[i,]<-impulse_ecoli@lsModelFits[["case"]][[monoDE[i]]][["lsSigmoidFit"]][["vecSigmoidParam"]]}
+monoparamsdf<-as.data.frame(monoparamsmat)
+colnames(monoparamsdf)<-c("beta", "h0", "h1", "t")
+rownames(monoparamsdf)<-monoDE
+
+#when we plot a histogram of all the monotonic (sigmoid) DEGs, they all seem to be turning on at around the same time ~60-65 mins. Is this right
+ggplot(monoparamsdf)+geom_histogram(aes(x=t))+xlim(0,150)+ggtitle("Onset time (t_1) parameters for Monotonic DEGs")
+
+#####
+#Illustration of the problem: does the sigmoid model fit the data for gadB?
+#####
+
+#plot_gene function can help you look at the discrepency betweeen models and the data
+plot_gene<-function(gene="gadB"){
+  #extract normalized counts for your gene of choice, and for the CASE samples
+  vecCounts<-unlist(c(normecounts[rownames(normecounts)==gene, grep("JH01", colnames(normecounts))]))
+  
+  #extract poorly fitted model
+  params=unlist(c(monoparamsdf[rownames(monoparamsdf)==gene,]))
+  
+  #plot the points over the 150 minute time course along with the poorly fit model
+  plot(rep(seq(0,150,30), 3), vecCounts, main=paste(gene, "Sigmoid Model Fit", paste=" "))
+  lines(seq(0,150,1), evalSigmoid_comp(c(params[1], params[2], params[3], params[4]), seq(0,150,1)), col="red")
+}
+
+#models do not describe data for these three genes, and presumably many more
+par(mfrow=c(2,2))
+plot_gene(gene="gadA")
+plot_gene(gene="gadB")
+plot_gene(gene="gadC")
+```
+
+# Random parameter initializations
+
+Like you, I was surprised to see the ImpulseDE2 method work so poorly out of the box in fitting descriptive models to the data. I checked the source code and couldn't find an immediately wrong with their method, but I noticed that the way the authors created parameter initializations looked suspect. Here's how they initialized all the parameters:  
+$$
+\beta=1, \\  
+h_0=\max(\bar{x}_0, \bar{x}_{30}), \\  
+h_1=\min(\bar{x}_{60}, \bar{x}_{90}, \bar{x}_{120}, \bar{x}_{150}), \\  
+t_1=60 \\ 
+$$
+Where $\bar{x}_i$ denotes the mean expression at time point $i$. 60 was chosen as the initialization value for $t_1$ since that was the "middle timepoint". While these initialization values are not inherently bad, the challenge is that nonlinear curve fitting algorithms in high throughput settings generally converge to local minina that are undesirable.  
+
+In order to circumvent this challenge, many randomly generated initialization values can be generated prior to performing the optimization procedure. Then output models comparing the resulting models for the highest log-likelihood can be used to select the best-fitting solution across the initialization grid.  
+
+All the functions in the ImpulseDE2 are loaded into the global environment. Here are a few that will be useful. 
+
+* evalLogLikSigmoid()
+  + In the 'srcImpulseDE2_CostFunctionsFit.R' file. Evaluates the log likelihood of a sigmoid model with particular parameters. Critical part of the model fitting procedure
+* evalSigmoid()
+  + In the 'srcImpulseDE2_evalSigmoid.R' file. Computes values (read counts) of sigmoid model given parameters (Beta, log(h_0), log(h_1), t_1)
+* estimateSigmoidParam()
+  + In the 'srcImpulseDE2_fitSigmoid.R' file. Generates initialization values (guesses) for sigmoid parameters.
+* fitSigmoidModel()
+  + In the 'srcImpulseDE2_fitSigmoid.R' file. Using optim() function from stats package with method="BFGS", fits the parameters to the data for a singel gene.
+* fitSigmoidGene()
+  + In the 'srcImpulseDE2_fitSigmoid.R' file. Wrapper for fitSigmoidModel() that determines whether the model should be up or downregulated.
+  
+Here is my attempt at improving the model by employing many random initializations. This method will be analogous to fitSigmoidModel() with an additional plotting feature. Arguments are explained below:  
+
+* gene=NULL: option to put in a gene of interest, will extract all useful information for you
+* vecCounts: count data to fit model to (unnormalized)
+* scaDisp: dispersion parameter for a gene
+* vecSizeFactors: size factors for CASE samples (correspond to "JH01")
+* vecTimepointsUnique: vector of timepoints seq(0,150,30)
+* vecidxTimepoint: vector connecting timepoints to counts rep(1:6,3)
+* lsvecidxBatch=NULL: batch effects
+* MAXIT=1000: maximum number of iterations in optimization
+* init_num=200: number of parameter initializations that you want
+* seed=47: random seed
+* RELTOL=10^-9: convergence tolerance
+* verbose=FALSE: display messages during fitting?
+* plot=TRUE: display a plot of the counts and fitted sigmoid function be displayed
+* NOTE: method is now "L-BFGS-B" where I can put bounds on the parameters to be fit.
+
+```{r Fit Sigmoid Model with Random Initializations, cache=TRUE, echo=FALSE}
+fitSigmoidModel_randinit<-function(gene=NULL, vecCounts, scaDisp, vecSizeFactors, vecTimepointsUnique, 
+    vecidxTimepoint, lsvecidxBatch=NULL, MAXIT = 1000, init_num=200, seed=47, RELTOL=10^-9, verbose=FALSE, plot=TRUE){
+    
+    set.seed(seed)
+    
+    #matrix to store output of various initializations
+    res_mat<-matrix(ncol=5, nrow=init_num)
+    
+    #vector to store initializations
+    vecParamGuess<-c()
+  if (is.null(gene)){
+    for (i in 1:init_num){
+      if(verbose==TRUE){print(paste("initialization", i, " "))}
+    
+      #generate some random initializations
+      #slope (beta)
+      vecParamGuess[1]=runif(1, min=0, max=20)
+      #initial amplitude (h_0)
+      vecParamGuess[2]=runif(1, min=0, max=5)
+      #final amplitude (h_1)
+      vecParamGuess[3]=runif(1, min=0, max=20)
+      #onset time (t_1)
+      vecParamGuess[4]=runif(1, min=0, max=150)
+      
+      #vector to store parameters and log likelihood
+      res_vec<-c()
+      
+      #run model fitting with guess vecParamGuess, evalLogLikeSigmoid_comp as loglikelihood function,
+      #vecCounts as count data, scaDisp as dispersion estimate, vecSizeFactors as normalization factors from
+      #ecolidds (DESeq2), vecTimePointsUnique (seq(0,150,30)), vecidxTimepoint (vector relating the counts & time
+      #points)
+      output<-optim(par = vecParamGuess, fn = evalLogLikSigmoid_comp, 
+              vecCounts = vecCounts, scaDisp = scaDisp, 
+              vecSizeFactors = vecSizeFactors, 
+              vecTimepointsUnique = vecTimepointsUnique, 
+              vecidxTimepoint = vecidxTimepoint, lsvecidxBatch = lsvecidxBatch, 
+              vecboolObserved = !is.na(vecCounts), method="BFGS",
+              control = list(maxit = MAXIT, factr = RELTOL, fnscale = -1), hessian=TRUE)
+      
+      #store in res_vec
+      res_vec<-c(output$par, output$value)
+      
+      #read res_vec into res_mat
+      res_mat[i,]<-res_vec
+    }
+    
+    #output best (highest log likelihood) result
+    res_mat[which.max(res_mat[,5]),][1:4]
+  }
+    
+  if(!is.null(gene)){
+    #if we know the gene we want to plot, collect the information for the user
+    vecCounts=unlist(c(ecounts[rownames(ecounts)==gene, grep("JH01", colnames(ecounts))]))
+    
+    scaDisp=impulse_ecoli@vecDispersions[names(impulse_ecoli@vecDispersions)==gene]
+    
+    vecSizeFactors=ecolidds$sizeFactor[grep("JH01", names(ecolidds$sizeFactor))]
+    
+    vecTimepointsUnique=seq(0,150,30)
+    
+    vecidxTimepoint=rep(1:6, 3)
+    
+    lsvecidxBatch=NULL
+    
+    #then just run the same simulation as above
+    for (i in 1:init_num){
+      if(verbose==TRUE){print(paste("initialization", i, " "))}
+    
+      #generate some random initializations
+      #slope (beta)
+      vecParamGuess[1]=runif(1, min=0, max=20)
+      #initial amplitude (h_0)
+      vecParamGuess[2]=runif(1, min=0, max=20)
+      #final amplitude (h_1)
+      vecParamGuess[3]=runif(1, min=0, max=20)
+      #onset time (t_1)
+      vecParamGuess[4]=runif(1, min=0, max=150)
+      
+      #vector to store parameters and log likelihood
+      res_vec<-c()
+      
+      #run model fitting with guess vecParamGuess, evalLogLikeSigmoid_comp as loglikelihood function,
+      #vecCounts as count data, scaDisp as dispersion estimate, vecSizeFactors as normalization factors from
+      #ecolidds (DESeq2), vecTimePointsUnique (seq(0,150,30)), vecidxTimepoint (vector relating the counts & time
+      #points)
+      output<-optim(par = vecParamGuess, fn = evalLogLikSigmoid_comp, 
+              vecCounts = vecCounts, scaDisp = scaDisp, 
+              vecSizeFactors = vecSizeFactors, 
+              vecTimepointsUnique = vecTimepointsUnique, 
+              vecidxTimepoint = vecidxTimepoint, lsvecidxBatch = lsvecidxBatch, 
+              vecboolObserved = !is.na(vecCounts), method="L-BFGS-B", lower=c(0,0,0,0), 
+              upper=c(Inf, Inf, Inf, 150),
+              control = list(maxit = MAXIT, factr = RELTOL, fnscale = -1), hessian=TRUE)
+      
+      #store in res_vec
+      res_vec<-c(output$par, output$value)
+      
+      #read res_vec into res_mat
+      res_mat[i,]<-res_vec
+    }
+  #output best result
+  res_mat[which.max(res_mat[,5]),][1:4]
+  }
+    
+if(plot==TRUE){
+  plot(rep(seq(0,150,30), 3), vecCounts*vecSizeFactors, main=paste(gene, "Sigmoid Model", sep=" "), ylab="Normalized expression", xlab="Time (mins)")
+  lines(seq(0,150,1), exp(evalSigmoid_comp(res_mat[which.max(res_mat[,5]),][1:4], seq(0,150,1))), col="red")
+  abline(v=res_mat[which.max(res_mat[,5]),][4], col="blue")
+}
+res_mat[which.max(res_mat[,5]),][1:4]
+}
+
+#try out the function on gadA, gadB, gadC
+fitSigmoidModel_randinit(gene="gadA")
+fitSigmoidModel_randinit(gene="gadB")
+fitSigmoidModel_randinit(gene="gadC")
+
+#sample some monotonic genes and check out the fits
+sample=sample(rownames(monoparamsdf), 4)
+par(mfrow=c(2,2))
+for (i in 1:length(sample)){
+  fitSigmoidModel_randinit(sample[i])
+}
+```
+
+As illustrated in these plots, the estimation of the onset time parameter (t_1 shown by the blue line on the plots) looks much more appropriate considering the shape of the data. However, the final expression value is still way off where it should be. The final optimization procedure should probably be adapted from this one, but this should give a pretty good idea of where the actual t_1 parameters lie.  
+
+I believe this method doesn't need a wrapper to decide whether an upregulated or downregulated fit is better, because the function will automatically generate initializations where $h_0 > h_1$ and other cases where $h_0 < h_1$, and the log likelihood selection criteria ensures that the best fit is returned.  
+
+# Improvements to this method
+1. Better estimation of the h_1 parameter: it looks like we're consistently missing the steady state expression below. Perhaps fixing the h_1 value by taking the mean at the final time point, and then optimizing the fit of the three remaining parameters would help improve the fit.
+2. Randomly generated parameter estimates bounds. I randomly generated parameters like so:
+$$
+\beta=rand[0,20], \\  
+\log(h_0)=rand[0,20], \\  
+\log(h_1)=rand[0,20], \\  
+t_1=rand[0,150], \\  
+$$
+More thoughout could be put into how we're generating these random initializations so that more useful outputs are created more often.
+3. Look at the source code again to understand why log(h_0) and log(h_1) are being used and whether this is influencing the estimation of t_1. Also, I think there may be a problem in the source code where the function is being fit to normalized counts and the log likelihood is being evaluated for the unnormalized counts. This problem should be corrected.
+4. Gene-wise model fitting is probably running into problems with overfitting. Is there a way to share information between genes for better parameter estimation? Perhaps an alternative parameterization of the sigmoid model (in Sicegar where there are only 3 parameters to be estimated) could be useful here.
+
+
+

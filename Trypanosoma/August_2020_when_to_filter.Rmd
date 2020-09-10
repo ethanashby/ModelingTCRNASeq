@@ -1,0 +1,78 @@
+---
+title: "August_2020_when_to_filter"
+author: "Ethan Ashby"
+date: "8/18/2020"
+output: html_document
+---
+
+# Update: 24hr only data, but do we filter by LFC prior or after clustering
+
+# Filter before we clustering
+
+```{r}
+###################################################################################################################################
+#Read in data
+
+###################################################################################################################################
+
+#read in real RNA-Seq data from Schultz
+library(DESeq2)
+library(tidyverse)
+library(Mfuzz)
+library(cluster)
+library(factoextra)
+library(VennDiagram)
+library(EnhancedVolcano)
+library(ggfortify)
+#read in data and clean... ONLY first 24 hrs
+tccount<-read.table("./Trypanosoma/18-5-23_dedup_Proc_ibet_TC_for_deseq_w3hr.txt", header=TRUE)
+tccount<- tccount %>% dplyr::distinct(gene, .keep_all=TRUE)
+rownames(tccount)<-tccount$gene
+tccount<-tccount[,c(2:31)]
+
+#filter genes that are all 0's
+tccount<-tccount[rowSums(tccount)>0,]
+
+#########Read count data for first 24hrs
+tccount<-tccount[,c(1:3, 5:6, 7:9, 10:12, 13:15)]
+
+#avoid problems with log link by adding 1 to each entry
+tccount<-tccount+1
+
+#treat time categorically, use LRT to test for any differences between any times (i.e. expression changes)
+design<-data.frame(time=as.factor(c(rep("0", 3), rep("3", 2), rep("6", 3), rep("12", 3), rep("24",3))), rep=as.factor(c(1:3, 1:2, rep(1:3, 3))))
+
+#create DESeqDataSet Object, design takes into account time
+ddstcCountTable <- DESeqDataSetFromMatrix(
+  countData = tccount,
+  colData = design,
+  design = ~time)
+
+#run DESEQ with LRT and empty reduced model
+trypdds<-DESeq(ddstcCountTable, test="LRT", reduced= ~1)
+
+results<-results(trypdds)
+
+results<-results[complete.cases(results),]
+
+results %>% as.data.frame() %>% mutate(thresh=as.factor(ifelse(abs(log2FoldChange)>1 & padj<0.01, 2, ifelse(abs(log2FoldChange)<1 & padj>0.01, 0, 1)))) %>% ggplot(aes(x=log2FoldChange, y=-log10(padj), color=thresh))+geom_point()+scale_color_manual(name="Thresholds", values=c("black", "navy", "dodgerblue"), labels=c("padj>0.01 AND log2FoldChange<1", "padj<0.01 OR log2FoldChange>1", "padj<0.01 AND log2FoldChange>1"))+theme_bw()+geom_hline(yintercept=2, color="red", linetype=2)+geom_vline(xintercept=1, color="red", linetype=2)+geom_vline(xintercept=-1, color="red", linetype=2)
+
+results %>% as.data.frame() %>% filter(abs(log2FoldChange)>1 & padj<0.01) %>% summarize('Number that surpass threshold'=n())
+
+
+###ImpulseDe2
+
+times<-c(rep(0,3), rep(3,2), rep(6,3), rep(12,3),rep(24,3))
+
+impulse_design<-data.frame(Sample=colnames(tccount), Condition=rep("case",14), Time=times)
+
+#edit count matrix and filter s.t. average count is double digits
+tccount<-as.matrix(tccount)
+
+#may take awhile to run ImpulseDE2 (~20 mins), using q-value threshold of 0.01
+tryp_impulse<-ImpulseDE2::runImpulseDE2(tccount, impulse_design, boolCaseCtrl=FALSE, boolIdentifyTransients=TRUE, vecConfounders=NULL, scaNProc=8, scaQThres = 0.01)
+
+fits<-ImpulseDE2::get_lsModelFits(tryp_impulse)
+
+fits$case %>% length()
+```

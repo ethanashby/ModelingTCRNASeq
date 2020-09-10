@@ -1,0 +1,19 @@
+Time,Genotype,Trial,Experiment,meanDensity,meanRpoS,n
+0,wt,A,stationary phase,0.34,9.645823458338248e-6,3
+0,wt,B,stationary phase,0.27,3.806841791516957e-5,3
+0,wt,C,stationary phase,0.42,1.6523383519988599e-4,3
+30,wt,A,stationary phase,0.66,4.480498151407362e-4,3
+30,wt,B,stationary phase,0.55,2.821916728088027e-4,3
+30,wt,C,stationary phase,0.76,2.2807364037676428e-4,3
+60,wt,A,stationary phase,0.99,0.0022299349727311095,3
+60,wt,B,stationary phase,1.06,8.059510685405297e-4,3
+60,wt,C,stationary phase,1.7,0.0029543412531791487,3
+90,wt,A,stationary phase,2.2,0.01548947709076973,3
+90,wt,B,stationary phase,1.9,0.00499120217975639,3
+90,wt,C,stationary phase,2.6,0.00788581713025161,3
+120,wt,A,stationary phase,3.2,0.026937560656206578,3
+120,wt,B,stationary phase,2.6,0.008202072165948395,3
+120,wt,C,stationary phase,4.3,0.015051658724865276,3
+150,wt,A,stationary phase,3.9,0.024627022289709664,3
+150,wt,B,stationary phase,3.6,0.009739690491446597,3
+150,wt,C,stationary phase,4.4,0.032354938740993065,3

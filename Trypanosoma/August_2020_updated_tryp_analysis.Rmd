@@ -1,0 +1,281 @@
+---
+title: "tryp Analysis Edit"
+author: "Ethan Ashby"
+date: "7/28/2020"
+output: html_document
+---
+
+## Update
+
+Update to previous Rmd to run on the '18-5-23_dedup_Proc_ibet_TC_for_deseq_w3hr.txt.txt' dataset which includes all data points except the first 3hr time point, which was excluded due to outlying in the PCA plot. The following differential expression methods were used.
+* DESeq2, a differential expression algorithm that treats time categorically. Used the union of all 0hr-Xhr contrasts.
+* ImpulseDE2, a serial differential expression algorithm that fits S-shpaed models to the data and designates a gene as significant if it differs significantly from a flat profile.
+* maSigPro, another time course tool that models expression using polynomial regression.
+
+The data are summarized in a volcano plot and venn diagram to show the intersection of the DEG lists for these methods. We considered the gene set corresponding to the intersection of all 3 tools.
+
+We chose to use fuzzy clustering designed for time course gene expression data (MFuzz package) to group these expression profiles. Fuzzy clustering is a form of soft clustering, meaning that genes can belong to multiple clusters. This is particularly useful for gene expression data, where cluster profiles often overlap. Soft clustering allows for the identification of interpretable internal cluster structures (prototype profiles) that are more noise robust than other methods. A useful output of Mfuzz is a gene-wise cluster membership score from [0,1], indicating how strongly each gene accords with its cluster membership. This can be used to filter genes *a posteriori*. 
+
+The data was scaled to a normalized, euclidian scale prior to clustering (each gene expression was standardized to mean value 0 and std 1). Read counts were normalized using the DESeq2 normalization method *a priori*. The number of clusters, $C$, was informed by a plot of the minimum centroid distance (using the elbow method), a standard method for selecting $C$. In this scenario, 12 clusters were used.
+
+We plotted the 12 clusters, which displayed several distinct expression profiles. We extracted expression cores (i.e. genes that showed high cluster membership from each cluster), and then ran GO enrichment and Pathway analyses on these cluster cores. 
+
+**NOTE** our GO analysis is depreciated. To update the GO analysis, go to TriTrypDb under the strategies window (https://tritrypdb.org/tritrypdb/app/query-grid). Select Gene ID(s) under Annotation, curation, and identifiers. You can copy and paste your gene list associated with each cluster (output as csvs) into the window. Then the strategy window will open. Scroll to the bottom and select the 'Analyze Results' tab. You can select GO enrichment (or others if you are interested). Select the kind of GO term you're interested in and the p-value cutoff. Download the results. You can process these results using the 'return_GO' function written below.
+
+## Code
+
+```{r}
+###################################################################################################################################
+#Read in data
+
+###################################################################################################################################
+
+#read in real RNA-Seq data from Schultz
+library(DESeq2)
+library(tidyverse)
+library(ImpulseDE2)
+library(maSigPro)
+library(Mfuzz)
+library(cluster)
+library(factoextra)
+library(VennDiagram)
+library(EnhancedVolcano)
+library(MASS)
+#read in data and clean
+tccount<-read.table("18-5-23_dedup_Proc_ibet_TC_for_deseq_w3hr.txt", header=TRUE)
+tccount<- tccount %>% dplyr::distinct(gene, .keep_all=TRUE)
+rownames(tccount)<-tccount$gene
+tccount<-tccount[,c(2:31)]
+tccount<-tccount[rowSums(tccount)>0,]
+
+#################
+#PCA plot
+################
+sizefacs<-estimateSizeFactorsForMatrix(tccount)
+to_pca<-t(t(tccount)/sizefacs)
+
+pca<-prcomp(t(to_pca), scale=TRUE)
+
+autoplot(pca, t(to_pca), label = TRUE, color="Group")+theme_bw()
+
+tccount<-tccount[,c(1:3, 5:30)]
+
+###################################################################################################################################
+#DESeq2
+###################################################################################################################################
+design<-data.frame(time=as.factor(c(rep("0h", 3), rep("3h", 2), rep("6h", 3), rep("12h", 3), rep("24h",3), rep("48h",3), rep("3d",3), rep("7d",3), rep("10d",3), rep("14d",3))), rep=as.factor(c(1:3, 1:2, rep(1:3, 8))))
+
+#create DESeqDataSet Object
+ddstcCountTable <- DESeqDataSetFromMatrix(
+  countData = tccount,
+  colData = design,
+  design = ~ time + rep)
+
+#Run DESeq2
+trypdds<-DESeq(ddstcCountTable)
+
+res3<-results(trypdds, contrast=c("time", "0h", "3h"))
+res3$gene<-rownames(res3)
+res3$contrast<-"0v3"
+res3<-as.data.frame(res3)
+res6<-results(trypdds, contrast=c("time", "0h", "6h"))
+res6$gene<-rownames(res6)
+res6$contrast<-"0v6"
+res6<-as.data.frame(res6)
+res12<-results(trypdds, contrast=c("time", "0h", "12h"))
+res12$gene<-rownames(res12)
+res12$contrast<-"0v12"
+res12<-as.data.frame(res12)
+res24<-results(trypdds, contrast=c("time", "0h", "24h"))
+res24$gene<-rownames(res24)
+res24$contrast<-"0v24"
+res24<-as.data.frame(res24)
+res48<-results(trypdds, contrast=c("time", "0h", "48h"))
+res48$gene<-rownames(res48)
+res48$contrast<-"0v48"
+res48<-as.data.frame(res48)
+res3d<-results(trypdds, contrast=c("time", "0h", "3d"))
+res3d$gene<-rownames(res3d)
+res3d$contrast<-"0v3d"
+res3d<-as.data.frame(res3d)
+res7d<-results(trypdds, contrast=c("time", "0h", "7d"))
+res7d$gene<-rownames(res7d)
+res7d$contrast<-"0v7d"
+res7d<-as.data.frame(res7d)
+res10d<-results(trypdds, contrast=c("time", "0h", "10d"))
+res10d$gene<-rownames(res10d)
+res10d$contrast<-"0v10d"
+res10d<-as.data.frame(res10d)
+res14d<-results(trypdds, contrast=c("time", "0h", "14d"))
+res14d$gene<-rownames(res14d)
+res14d$contrast<-"0v14d"
+res14d<-as.data.frame(res14d)
+
+sigres<-rbind(res3[res3$padj<0.01,], res6[res6$padj<0.01,], res12[res12$padj<0.01,], res24[res24$padj<0.01,], res48[res48$padj<0.01,], res3d[res3d$padj<0.01,], res7d[res7d$padj<0.01,], res10d[res10d$padj<0.01,], res14d[res14d$padj<0.01,])
+
+sigres<-sigres[complete.cases(sigres),]
+
+sigres$contrast<-factor(sigres$contrast, levels=c("0v3", "0v6", "0v12", "0v24", "0v48", "0v3d", "0v7d", "0v10d", "0v14d"))
+
+#generate volcano plot
+#good version
+#EnhancedVolcano(res,
+    #lab = rownames(res),
+    #x = 'log2FoldChange',
+    #y = 'pvalue',
+    #title = 'DESeq2 Identified DEGs (0h-12h contrast)',
+    #pCutoff = 0.01,
+    #col=c('black', 'cyan4', 'cyan3', 'cyan'),
+    #colAlpha = 1,
+    #xlim = c(-2, 8))
+
+#ggplot version
+sigres<-sigres %>% mutate(sig=ifelse(abs(log2FoldChange)>2 & padj<0.01/9, TRUE, FALSE))
+
+sigres %>% ggplot(aes(x=log2FoldChange, y=-log(padj), color=sig, size=sig))+geom_point()+scale_size_discrete(range=c(0.1, 2))+ggtitle("Volcano plot of DESeq2 Identified DEGs")+theme_bw()+facet_wrap(~contrast)
+
+DESEQ_genes<-sigres$gene %>% unique()
+
+###################################################################################################################################
+#Serial expression tool: Set up and run ImpulseDE2
+###################################################################################################################################
+
+times<-c(rep(0,3), rep(3,2), rep(6,3), rep(12,3),rep(24,3),rep(48,3),rep(72,3),rep(168,3),rep(240,3),rep(336,3))
+
+impulse_design<-data.frame(Sample=colnames(tccount), Condition=rep("case",29), Time=times)
+
+#edit count matrix and filter s.t. average count is double digits
+tccount<-as.matrix(tccount)
+
+#may take awhile to run ImpulseDE2 (~20 mins), using q-value threshold of 0.01
+tryp_impulse<-ImpulseDE2::runImpulseDE2(tccount, impulse_design, boolCaseCtrl=FALSE, boolIdentifyTransients=TRUE, vecConfounders=NULL, scaNProc=8, scaQThres = 0.01)
+
+#Venn diagram to visualize DEG overlap between tools
+area <- length(intersect(tryp_impulse$vecDEGenes,DESEQ_genes))
+draw.pairwise.venn(area1= length(DESEQ_genes), area2 = length(tryp_impulse$vecDEGenes), cross.area = area, category = c("DESeq2","ImpulseDE2\n(serial analysis)"),lty = rep("blank",2),fill = c("light blue", "light green"))
+
+###################################################################################################################################
+#Serial expression tool: NEXT maSigPro
+###################################################################################################################################
+
+#set up design
+times<-c(rep(0,3),rep(3,2),rep(6,3),rep(12,3),rep(24,3),rep(48,3),rep(72,3),rep(168,3),rep(240,3),rep(336,3))
+replicates<-as.factor(c(1:3, 1:2, rep(1:3, 8)))
+group<-rep(1,29)
+ss.edesign<-cbind(times, replicates, group)
+rownames(ss.edesign)<-colnames(tccount)
+
+#Run maSigPro on DESeq2 normalized counts, theta=1000... elimanate all genes with 0 counts
+tccount1<-as.data.frame(ceiling(counts(trypdds, normalized=TRUE)))
+tccount1<-tccount1[rowSums(tccount1)>0,]
+ss.edesign<-as.data.frame(ss.edesign)
+newdesign<-make.design.matrix(ss.edesign, degree=4, time.col=1, repl.col=2, group.cols=3)
+
+#must have # observations> # samples, add one to each gene to avoid 0 entries (messes up convergence)
+tccount1<-tccount1+1
+NBp <- p.vector(tccount1, newdesign, counts=TRUE, epsilon=1E-6, Q=0.01, MT.adjust="BH", min.obs=30)
+#NBt <- T.fit(NBp, epsilon=0.0001, family=negative.binomial())
+#get<-get.siggenes(NBt, vars="all")
+
+#run maSigPro w/ Q=0.01
+maSigProGenes<-NBp$SELEC %>% rownames()
+
+area1 <- length(intersect(DESEQ_genes, maSigProGenes))
+area2<- length(intersect(tryp_impulse$vecDEGenes,DESEQ_genes))
+area3 <- length(intersect(maSigProGenes, tryp_impulse$vecDEGenes))
+area123<-length(intersect(intersect(maSigProGenes, tryp_impulse$vecDEGenes), intersect(maSigProGenes,DESEQ_genes)))
+draw.triple.venn(area1= length(DESEQ_genes), area2 = length(maSigProGenes), area3= length(tryp_impulse$vecDEGenes), n12=area1, n23=area3, n13=area2, n123=area123, category = c("DESeq2","maSigPro\n(serial)", "ImpulseDE2(serial)"), lty = rep("blank",3), fill = c("light blue", "light green", "pink"))
+
+###################################################################################################################################
+#Generate Final DEGList, interesect of 3 tools
+###################################################################################################################################
+
+tryp_DEGs<-unique(intersect(intersect(DESEQ_genes,maSigProGenes), tryp_impulse$vecDEGenes))
+write.csv(tryp_DEGs, "tryp_DEGs.csv")
+#tryp_DEGs<-read.csv("/Users/ethanashby/Desktop/RNA-Seq Github/tryp_DEGs.csv")
+#tryp_DEGs<-tryp_DEGs$x
+#tryp_DEGs
+```
+
+#Intersection
+
+Using the intersection of all three tools, calculate means at each time point and using Dmin, which calculates minimum centroid distance and elbow method to choose number of clusters.
+
+```{r Intersection}
+####################################################################################################
+#Fuzzy clustering of DEGs
+####################################################################################################
+
+#DEGcounts
+DEGcounts<-counts(trypdds, normalized = TRUE)
+DEGcounts<-DEGcounts[rownames(DEGcounts) %in% tryp_DEGs,]
+
+###Too many clusters in all TPs. Let's only look at first 24 hours
+cluster_data<-matrix(ncol=10, nrow=dim(DEGcounts)[1])
+for (i in 1:dim(DEGcounts)[1]){
+  cluster_data[i,]<-c(mean(DEGcounts[i, 1:3]), mean(DEGcounts[i, 4:5]), mean(DEGcounts[i, 6:8]), mean(DEGcounts[i, 9:11]), mean(DEGcounts[i, 12:14]), mean(DEGcounts[i, 15:17]), mean(DEGcounts[i, 18:20]), mean(DEGcounts[i, 21:23]), mean(DEGcounts[i, 24:26]), mean(DEGcounts[i, 27:29]))}
+rownames(cluster_data)<-rownames(DEGcounts)
+colnames(cluster_data)<-c(0,3,6,12,24,48,72,168,240,336)
+Set<-ExpressionSet(cluster_data)
+Set.s<-standardise(Set)
+
+#Dmin to choose # clusters=7
+Dmin(Set.s, m=mestimate(Set.s), crange=seq(2,15,1), repeats=10, visu=TRUE)
+
+cl<-mfuzz(Set.s, c=12, m=mestimate(Set.s))
+
+#plot clusters
+pdf("tryp_fuzzy_clusters.pdf", onefile = TRUE)
+mfuzz.plot2(Set.s, cl, mfrow=c(2,6), time.labels = c(0,3,6,12,24,48,72,168,240,336), time.points=c(0,3,6,12,24,48,72,168,240,336), min.mem=0)
+dev.off()
+
+#extract cluster cores (genes with membership>0.9)
+cores<-acore(Set.s, cl, min.acore=0.9)
+
+###Run GO Analysis on these clusters
+write.table(cores[[1]]$NAME, "Cluster1_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[2]]$NAME, "Cluster2_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[3]]$NAME, "Cluster3_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[4]]$NAME, "Cluster4_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[5]]$NAME, "Cluster5_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[6]]$NAME, "Cluster6_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[7]]$NAME, "Cluster7_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[8]]$NAME, "Cluster8_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[9]]$NAME, "Cluster9_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[10]]$NAME, "Cluster10_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[11]]$NAME, "Cluster11_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+write.table(cores[[12]]$NAME, "Cluster12_of_12_Tryp_mem90.txt", row.names=FALSE, col.names=FALSE, quote=FALSE)
+
+####################################################################################################
+#RUN GO ANALYSIS in TriTrypDb for each of the cores (Cellular Component, Biological Process, & Mol Function)
+####################################################################################################
+
+#return ontologies
+return_GO<-function(file=NULL, GO_type=NULL, Benjamini_p_val=0.01){
+if(is.null(file)){
+  stop("'file' containing Biological Process, Cellular Component, or Molecular Function Gene Ontologies from TriTrypDb must be provided")
+}
+if(is.null(GO_type)){
+   stop("Please provide Gene Ontology (GO) type: BP, CC, MF")
+}
+
+if(GO_type=="Biological Process" | GO_type=="BP"){
+  Cluster_BioProcess<-read.table(file, sep="\t", header=TRUE)
+  Cluster_BioProcess<-Cluster_BioProcess %>% filter(Benjamini<0.01)
+  Cluster_BioProcess$Type<-rep("Biological Process", dim(Cluster_BioProcess)[1])
+  return(Cluster_BioProcess)
+}
+if(GO_type=="Cellular Component" | GO_type=="CC"){
+  Cluster_CellularComponent<-read.table(file, sep="\t", header=TRUE)
+  Cluster_CellularComponent<-Cluster_CellularComponent %>% filter(Benjamini<0.01)
+  Cluster_CellularComponent$Type<-rep("Cellular Component", dim(Cluster_CellularComponent)[1])
+  return(Cluster_CellularComponent)
+}
+if(GO_type=="Molecular Function" | GO_type=="MF"){
+  Cluster_MolecularFunction<-read.table(file, sep="\t", header=TRUE)
+  Cluster_MolecularFunction<-Cluster_MolecularFunction %>% filter(Benjamini<0.01)
+  Cluster_MolecularFunction$Type<-rep("Molecular Function", dim(Cluster_MolecularFunction)[1])
+  return(Cluster_MolecularFunction)
+}
+}
+```
