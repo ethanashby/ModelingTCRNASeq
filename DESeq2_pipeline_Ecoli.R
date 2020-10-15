@@ -115,15 +115,15 @@ ecolidds<-DESeq(ddsecoliCountTable, test="LRT", reduced= ~ time + treatment)
 #gives us contrasts to look at
 resultsNames(ecolidds)
 
-results30<-results(ecolidds, name="time30.treatmentWT") %>% as.data.frame()
+results30<-DESeq2::results(ecolidds, name="time30.treatmentWT") %>% as.data.frame()
 results30<- results30 %>% mutate(gene=rownames(results30))
-results60<-results(ecolidds, name="time60.treatmentWT") %>% as.data.frame()
+results60<-DESeq2::results(ecolidds, name="time60.treatmentWT") %>% as.data.frame()
 results60<- results60 %>% mutate(gene=rownames(results60))
-results90<-results(ecolidds, name="time90.treatmentWT") %>% as.data.frame()
+results90<-DESeq2::results(ecolidds, name="time90.treatmentWT") %>% as.data.frame()
 results90<- results90 %>% mutate(gene=rownames(results90))
-results120<-results(ecolidds, name="time120.treatmentWT") %>% as.data.frame()
+results120<-DESeq2::results(ecolidds, name="time120.treatmentWT") %>% as.data.frame()
 results120<- results120 %>% mutate(gene=rownames(results120))
-results150<-results(ecolidds, name="time150.treatmentWT") %>% as.data.frame()
+results150<-DESeq2::results(ecolidds, name="time150.treatmentWT") %>% as.data.frame()
 results150<- results150 %>% mutate(gene=rownames(results150))
 
 results<-rbind(results30, results60, results90, results120, results150)
@@ -133,7 +133,7 @@ results$time<-factor(results$time, levels=c("30", "60", "90", "120", "150"))
 results<-results[complete.cases(results),]
 
 #volcano plot
-results %>% mutate(thresh=as.factor(ifelse(abs(log2FoldChange)>1 & padj<0.01, 2, ifelse(abs(log2FoldChange)<1 & padj>0.01, 0, 1)))) %>% ggplot(aes(x=log2FoldChange, y=-log10(padj), color=thresh))+geom_point()+scale_color_manual(name="Thresholds", values=c("grey", "black", "darkorange1"), labels=c("padj>0.0\nAND log2FoldChange<1", "padj<0.01\nOR log2FoldChange>1", "padj<0.01\nAND log2FoldChange>1"))+theme_bw()+geom_hline(yintercept=2, color="blue", linetype=2)+geom_vline(xintercept=1, color="blue", linetype=2)+geom_vline(xintercept=-1, color="blue", linetype=2) +facet_grid(~time)+theme(strip.text = element_text(size=14), legend.text=element_text(size=12), legend.title=element_text(size=12), legend.position="bottom")
+results %>% mutate(thresh=as.factor(ifelse(abs(log2FoldChange)>1 & padj<0.01, 2, ifelse(abs(log2FoldChange)<1 & padj>0.01, 0, 1)))) %>% ggplot(aes(x=log2FoldChange, y=-log10(padj), color=thresh))+geom_point()+scale_color_manual(name="Thresholds", values=c("grey", "black", "darkorange1"), labels=c("padj>0.01\nAND log2FoldChange<1", "padj<0.01\nOR log2FoldChange>1", "padj<0.01\nAND log2FoldChange>1"))+theme_bw()+geom_hline(yintercept=2, color="blue", linetype=2)+geom_vline(xintercept=1, color="blue", linetype=2)+geom_vline(xintercept=-1, color="blue", linetype=2) +facet_grid(~time)+theme(strip.text = element_text(size=14), legend.text=element_text(size=12), legend.title=element_text(size=12), legend.position="bottom")
 
 #just pull out the significant results, should get 745 unique DEGs
 sig.results<-results[results$padj<0.01,]
@@ -141,3 +141,6 @@ sig.results<-results[results$padj<0.01,]
 #turns out they are all diff expressed at every TP
 vennset <- overLapper(split(sig.results[,7], sig.results$time)[1:5], type="vennsets")
 vennPlot(vennset, mymain="DEG intersections")
+
+#crappy heatmap
+sig.results[order(sig.results$padj),] %>% head(100*5) %>% ggplot(aes(x=time, y=gene, fill=log2FoldChange))+geom_tile()+scale_fill_gradient2(low="blue", mid="white", high="orange", midpoint = 5)
